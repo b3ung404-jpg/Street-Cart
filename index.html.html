@@ -1,0 +1,331 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Street Cart (스트리트 카트)</title>
+  
+  <!-- Leaflet 지도 라이브러리 및 깨짐 방지 CSS -->
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+
+  <!-- 파이어베이스 CDN 연동 -->
+  <script type="module">
+    import { initializeApp } from "https://www.gstatic.com/firebasejs/10.8.0/firebase-app.js";
+    import { getAuth, createUserWithEmailAndPassword, signInWithEmailAndPassword, signOut, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/10.8.0/firebase-auth.js";
+    import { getDatabase, ref, set, get, child } from "https://www.gstatic.com/firebasejs/10.8.0/firebase-database.js";
+
+    const firebaseConfig = {
+      apiKey: "AIzaSyDK77SpiBzSUzAlaD-oes83RoJU0zy24Vc",
+      authDomain: "findpotatokr.firebaseapp.com",
+      databaseURL: "https://findpotatokr-default-rtdb.firebaseio.com",
+      projectId: "findpotatokr",
+      storageBucket: "findpotatokr.firebasestorage.app",
+      messagingSenderId: "940474861314",
+      appId: "1:940474861314:web:dc1dfa51b5a36cc604e41b",
+      measurementId: "G-XRMESE3361"
+    };
+
+    const app = initializeApp(firebaseConfig);
+    const auth = getAuth(app);
+    const db = getDatabase(app);
+
+    let currentUser = null;
+
+    // 일반 아이디를 파이어베이스 호환 규격으로 안전하게 변환
+    function makeFakeEmail(username) {
+      const cleanUser = username.trim().replace(/[^a-zA-Z0-9]/g, "");
+      return `${cleanUser}@streetcart.app`;
+    }
+
+    // 회원가입
+    window.signUp = async () => {
+      const username = document.getElementById('auth-id').value;
+      const password = document.getElementById('auth-pw').value;
+
+      if (!username || !password) return alert("아이디와 비밀번호를 모두 입력해주세요.");
+      if (password.length < 6) return alert("비밀번호는 최소 6자리 이상이어야 합니다.");
+
+      const fakeEmail = makeFakeEmail(username);
+
+      try {
+        const userCredential = await createUserWithEmailAndPassword(auth, fakeEmail, password);
+        const user = userCredential.user;
+        
+        await set(ref(db, 'users/' + user.uid), {
+          username: username,
+          totalDistance: 0,
+          cart: []
+        });
+        alert("회원가입 성공! 자동 로그인되었습니다.");
+      } catch (err) {
+        console.error("회원가입 오류 세부사항:", err);
+        if (err.code === 'auth/operation-not-allowed') {
+          alert("파이어베이스 콘솔에서 [이메일/비밀번호] 인증이 활성화되지 않았습니다.");
+        } else if (err.code === 'auth/email-already-in-use') {
+          alert("이미 존재하는 아이디입니다.");
+        } else {
+          alert(`[가입 오류] ${err.message}`);
+        }
+      }
+    };
+
+    // 로그인
+    window.signIn = async () => {
+      const username = document.getElementById('auth-id').value;
+      const password = document.getElementById('auth-pw').value;
+
+      if (!username || !password) return alert("아이디와 비밀번호를 입력해주세요.");
+
+      const fakeEmail = makeFakeEmail(username);
+
+      try {
+        await signInWithEmailAndPassword(auth, fakeEmail, password);
+        alert("로그인 성공!");
+      } catch (err) {
+        console.error("로그인 오류 세부사항:", err);
+        alert("로그인 실패: 아이디 또는 비밀번호를 확인해주세요.");
+      }
+    };
+
+    // 로그아웃
+    window.logOut = () => {
+      signOut(auth).then(() => alert("로그아웃되었습니다."));
+    };
+
+    // 데이터 저장
+    window.saveUserData = async (distanceToAdd, newCartItem) => {
+      if (!currentUser) return;
+
+      const userRef = ref(db, 'users/' + currentUser.uid);
+      const snapshot = await get(userRef);
+      let userData = snapshot.val() || { totalDistance: 0, cart: [] };
+
+      const updatedDistance = (userData.totalDistance || 0) + (distanceToAdd || 0);
+      let updatedCart = userData.cart || [];
+      if (newCartItem) updatedCart.push(newCartItem);
+
+      await set(ref(db, 'users/' + currentUser.uid), {
+        username: userData.username || currentUser.email.split('@')[0],
+        totalDistance: updatedDistance,
+        cart: updatedCart
+      });
+
+      loadUserData(currentUser.uid);
+    };
+
+    // 데이터 불러오기
+    async function loadUserData(uid) {
+      const dbRef = ref(db);
+      const snapshot = await get(child(dbRef, `users/${uid}`));
+      if (snapshot.exists()) {
+        const data = snapshot.val();
+        document.getElementById('user-id-display').innerText = data.username || currentUser.email.split('@')[0];
+        document.getElementById('user-stats').innerHTML = 
+          `🏃 총 걸은 거리: <b>${Math.round(data.totalDistance || 0)}m</b>`;
+        
+        window.cart = data.cart || [];
+        updateCartUI();
+      }
+    }
+
+    // 로그인 상태 감지 및 지도 타일 크기 재조정
+    onAuthStateChanged(auth, (user) => {
+      if (user) {
+        currentUser = user;
+        document.getElementById('auth-container').style.display = 'none';
+        document.getElementById('game-container').style.display = 'block';
+        loadUserData(user.uid);
+
+        // 지도 렌더링 깨짐 방지 (화면 전환 후 지도 크기 재계산)
+        setTimeout(() => {
+          if (window.map) {
+            window.map.invalidateSize();
+          }
+        }, 300);
+      } else {
+        currentUser = null;
+        document.getElementById('auth-container').style.display = 'block';
+        document.getElementById('game-container').style.display = 'none';
+      }
+    });
+  </script>
+
+  <style>
+    html, body { width: 100%; height: 100%; margin: 0; padding: 0; font-family: sans-serif; }
+    
+    #auth-container { padding: 30px; text-align: center; max-width: 350px; margin: 50px auto; border: 1px solid #ccc; border-radius: 12px; box-shadow: 0 4px 10px rgba(0,0,0,0.1); }
+    #auth-container input { width: 80%; padding: 10px; margin: 8px 0; border: 1px solid #ddd; border-radius: 6px; }
+    #auth-container button { width: 85%; padding: 10px; margin-top: 10px; font-weight: bold; cursor: pointer; border-radius: 6px; border: none; }
+    .btn-login { background-color: #4CAF50; color: white; }
+    .btn-signup { background-color: #2196F3; color: white; margin-top: 5px !important; }
+    
+    #game-container { display: none; width: 100vw; height: 100vh; }
+    #map { width: 100%; height: 65vh; background: #e5e3df; } /* 지도 기본 배경 및 명확한 높이 지정 */
+    #ui { height: 35vh; padding: 15px; box-sizing: border-box; text-align: center; background: #f9f9f9; border-top: 2px solid #eee; }
+    .action-btn { padding: 12px 24px; font-size: 16px; font-weight: bold; background-color: #FF9800; color: white; border: none; border-radius: 8px; cursor: pointer; }
+    .logout-btn { background-color: #777; color: white; border: none; padding: 4px 8px; border-radius: 4px; cursor: pointer; margin-left: 10px; }
+
+    .food-marker-container { display: flex; align-items: center; background: rgba(255, 255, 255, 0.95); border: 2px solid #ff5722; border-radius: 20px; padding: 4px 8px; box-shadow: 0 4px 8px rgba(0,0,0,0.3); white-space: nowrap; }
+  </style>
+</head>
+<body>
+
+<!-- 1. 로그인 화면 -->
+<div id="auth-container">
+  <h2>Street Cart 로그인</h2>
+  <input type="text" id="auth-id" placeholder="아이디"><br>
+  <input type="password" id="auth-pw" placeholder="비밀번호 (6자리 이상)"><br>
+  <button class="btn-login" onclick="signIn()">로그인</button>
+  <button class="btn-signup" onclick="signUp()">회원가입</button>
+</div>
+
+<!-- 2. 게임 영역 -->
+<div id="game-container">
+  <div id="map"></div>
+  <div id="ui">
+    <p><b><span id="user-id-display"></span></b>님 환영합니다! <button class="logout-btn" onclick="logOut()">로그아웃</button></p>
+    <div id="user-stats">🏃 총 걸은 거리: 0m</div>
+    <p id="info">GPS 위치를 확인하고 있습니다...</p>
+    <button class="action-btn" onclick="generateRealRoadRoute()">🎲 500m 경로 생성</button>
+    <div id="cart" style="margin-top:12px; font-weight:bold;">🛒 내 카트: 비어 있음</div>
+  </div>
+</div>
+
+<script>
+  let userMarker, polyline;
+  let currentLat, currentLon;
+  let itemsOnMap = []; 
+  window.cart = []; 
+  let lastRouteDistance = 0;
+
+  function initMap() {
+    // Leaflet 지도 생성 및 타일 연결
+    window.map = L.map('map').setView([37.5665, 126.9780], 16);
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { 
+      maxZoom: 19,
+      attribution: '© OpenStreetMap'
+    }).addTo(window.map);
+
+    // GPS 위치추적
+    if (navigator.geolocation) {
+      navigator.geolocation.watchPosition(
+        position => {
+          currentLat = position.coords.latitude;
+          currentLon = position.coords.longitude;
+
+          if (!userMarker) {
+            userMarker = L.marker([currentLat, currentLon]).addTo(window.map);
+            window.map.setView([currentLat, currentLon], 17);
+            document.getElementById('info').innerText = "위치 확인 완료! 버튼을 눌러 경로를 생성하세요.";
+          } else {
+            userMarker.setLatLng([currentLat, currentLon]);
+          }
+          checkItemProximity(currentLat, currentLon);
+        },
+        error => { 
+          document.getElementById('info').innerText = "GPS 권한을 허용해주세요."; 
+        },
+        { enableHighAccuracy: true }
+      );
+    }
+  }
+
+  // 500m 랜덤 도로 경로 생성
+  async function generateRealRoadRoute() {
+    if (!currentLat || !currentLon) return alert("GPS 위치 확인 중입니다.");
+
+    if (polyline) window.map.removeLayer(polyline);
+    itemsOnMap.forEach(item => window.map.removeLayer(item.marker));
+    itemsOnMap = [];
+
+    const mainAngle = Math.random() * Math.PI * 2; 
+    const wayPointCount = Math.floor(Math.random() * 3) + 2; 
+    let waypoints = [];
+
+    for (let i = 0; i < wayPointCount; i++) {
+      const angle = mainAngle + ((Math.random() - 0.5) * 2.2);
+      const randomRadius = 70 + Math.random() * 130; 
+      const latOffset = Math.sin(angle) * (randomRadius / 111000);
+      const lonOffset = Math.cos(angle) * (randomRadius / (111000 * Math.cos(currentLat * Math.PI / 180)));
+      waypoints.push(`${currentLon + lonOffset},${currentLat + latOffset}`);
+    }
+
+    const osrmUrl = `https://router.project-osrm.org/route/v1/foot/${currentLon},${currentLat};${waypoints.join(';')};${currentLon},${currentLat}?overview=full&geometries=geojson`;
+
+    try {
+      const response = await fetch(osrmUrl);
+      const data = await response.json();
+      if (!data.routes || data.routes.length === 0) return generateRealRoadRoute();
+
+      const routeData = data.routes[0];
+      lastRouteDistance = routeData.distance;
+
+      if (lastRouteDistance > 650 || lastRouteDistance < 180) return generateRealRoadRoute();
+
+      const latLngs = routeData.geometry.coordinates.map(coord => [coord[1], coord[0]]);
+      polyline = L.polyline(latLngs, { color: '#FF5722', weight: 6 }).addTo(window.map);
+      window.map.fitBounds(polyline.getBounds());
+
+      spawnItemsAlongRoute(routeData.geometry.coordinates);
+      document.getElementById('info').innerHTML = `<b>라운드 시작!</b> (경로 거리: ${Math.round(lastRouteDistance)}m)`;
+
+      window.saveUserData(lastRouteDistance, null);
+
+    } catch (err) {
+      document.getElementById('info').innerText = "경로 생성 실패. 다시 시도해주세요.";
+    }
+  }
+
+  // 음식 아이템 생성
+  function spawnItemsAlongRoute(coords) {
+    const foodList = [
+      { ko: '감자', icon: '🥔' }, { ko: '사과', icon: '🍎' },
+      { ko: '빵', icon: '🍞' }, { ko: '우유', icon: '🥛' }
+    ];
+
+    const step = Math.floor(coords.length / 4);
+    for (let i = 1; i <= 3; i++) {
+      const targetIdx = Math.max(1, Math.min(coords.length - 2, i * step));
+      if (coords[targetIdx]) {
+        const [lng, lat] = coords[targetIdx];
+        const food = foodList[Math.floor(Math.random() * foodList.length)];
+        const customIcon = L.divIcon({
+          html: `<div class="food-marker-container"><span>${food.icon} ${food.ko}</span></div>`,
+          iconSize: [70, 25]
+        });
+        const marker = L.marker([lat, lng], { icon: customIcon }).addTo(window.map);
+        itemsOnMap.push({ marker, lat, lng, name: `${food.icon} ${food.ko}` });
+      }
+    }
+  }
+
+  // 거리 감지 및 아이템 수집
+  function checkItemProximity(userLat, userLng) {
+    if (itemsOnMap.length === 0) return;
+    itemsOnMap.forEach((item, index) => {
+      const dLat = (item.lat - userLat) * Math.PI / 180;
+      const dLon = (item.lng - userLng) * Math.PI / 180;
+      const a = Math.sin(dLat/2)**2 + Math.cos(userLat*Math.PI/180) * Math.cos(item.lat*Math.PI/180) * Math.sin(dLon/2)**2;
+      const distance = 6371e3 * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+
+      if (distance <= 5) {
+        window.map.removeLayer(item.marker);
+        itemsOnMap.splice(index, 1);
+        
+        window.saveUserData(0, item.name);
+        alert(`🎉 ${item.name} 획득! DB에 저장되었습니다.`);
+      }
+    });
+  }
+
+  function updateCartUI() {
+    const cartElement = document.getElementById('cart');
+    cartElement.innerText = window.cart.length === 0 ? "🛒 내 카트: 비어 있음" : `🛒 내 카트: ${window.cart.join(', ')}`;
+  }
+
+  window.onload = initMap;
+</script>
+
+</body>
+</html>
